@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NYC 311 Geospatial Dashboard</title>
+    <link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script>
+      window.MAPBOX_TOKEN = window.MAPBOX_TOKEN || 'pk.eyJ1IjoiY29waWxvdCIsImEiOiJjb3BpbG90LXRlc3QifQ';
+    </script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <h1>NYC 311 Explorer</h1>
+          <p>Interactive geospatial dashboard for 50k+ incident points.</p>
+        </div>
+
+        <div class="control-panel">
+          <label class="control-label" for="category-filter">Complaint Type</label>
+          <select id="category-filter" data-testid="category-filter"></select>
+        </div>
+
+        <div class="control-panel">
+          <button id="toggle-quadtree" type="button" data-testid="toggle-quadtree">Quadtree Mode: Off</button>
+        </div>
+
+        <div class="stats-card" data-testid="stats-container">
+          <h2>Visible Area Summary</h2>
+          <div class="stat-row">
+            <span>Top complaint</span>
+            <strong id="top-complaint-type">-</strong>
+          </div>
+          <div class="stat-row">
+            <span>Rendered points</span>
+            <strong id="rendered-points">-</strong>
+          </div>
+        </div>
+      </aside>
+
+      <main class="map-panel">
+        <div id="map" data-testid="map-container"></div>
+      </main>
+    </div>
+
+    <script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
