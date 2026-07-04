@@ -1,6 +1,9 @@
 const defaultMapboxToken = 'pk.eyJ1IjoiY29waWxvdCIsImEiOiJjb3BpbG90LXRlc3QifQ';
 window.MAPBOX_TOKEN = window.MAPBOX_TOKEN || defaultMapboxToken;
-mapboxgl.accessToken = window.MAPBOX_TOKEN;
+const useFallbackMap = typeof window.mapboxgl === 'undefined' || !window.mapboxgl?.Map || window.MAPBOX_TOKEN.includes('your_token_here') || window.MAPBOX_TOKEN.includes('copilot');
+if (window.mapboxgl?.accessToken !== undefined) {
+  window.mapboxgl.accessToken = window.MAPBOX_TOKEN;
+}
 
 class Quadtree {
   constructor(bounds, capacity = 16) {
@@ -87,6 +90,106 @@ function normalizeBounds(bounds) {
   return bounds;
 }
 
+function createFallbackMap(options = {}) {
+  const listeners = {};
+  const layers = {};
+  const sources = {};
+  const paintProperties = {};
+  const layoutProperties = {};
+  const filterExpressions = {};
+  let center = Array.isArray(options.center) ? [...options.center] : [-74.006, 40.7128];
+  let zoom = Number(options.zoom) || 10;
+
+  const emit = (eventName, payload) => {
+    const handlers = listeners[eventName] || [];
+    handlers.forEach((handler) => handler(payload));
+  };
+
+  return {
+    on(eventName, handler) {
+      listeners[eventName] = listeners[eventName] || [];
+      listeners[eventName].push(handler);
+      return this;
+    },
+    once(eventName, handler) {
+      const wrapped = (payload) => {
+        handler(payload);
+        listeners[eventName] = (listeners[eventName] || []).filter((item) => item !== wrapped);
+      };
+      this.on(eventName, wrapped);
+      return this;
+    },
+    addSource(id, source) {
+      sources[id] = source;
+      return this;
+    },
+    getSource(id) {
+      return sources[id] || null;
+    },
+    addLayer(layer) {
+      layers[layer.id] = layer;
+      return this;
+    },
+    getLayer(id) {
+      return layers[id] || null;
+    },
+    setFilter(layerId, filterExpression) {
+      filterExpressions[layerId] = filterExpression;
+      return this;
+    },
+    setPaintProperty(layerId, propertyName, value) {
+      paintProperties[`${layerId}:${propertyName}`] = value;
+      return this;
+    },
+    getPaintProperty(layerId, propertyName) {
+      return paintProperties[`${layerId}:${propertyName}`];
+    },
+    setLayoutProperty(layerId, propertyName, value) {
+      layoutProperties[`${layerId}:${propertyName}`] = value;
+      return this;
+    },
+    getLayoutProperty(layerId, propertyName) {
+      return layoutProperties[`${layerId}:${propertyName}`];
+    },
+    getCenter() {
+      return { lng: center[0], lat: center[1] };
+    },
+    getZoom() {
+      return zoom;
+    },
+    getBounds() {
+      const delta = Math.max(0.02, 0.01 * Math.max(1, zoom));
+      return {
+        getSouthWest: () => ({ lng: center[0] - delta, lat: center[1] - delta }),
+        getNorthEast: () => ({ lng: center[0] + delta, lat: center[1] + delta })
+      };
+    },
+    easeTo(options) {
+      if (Array.isArray(options.center)) {
+        center = [...options.center];
+      }
+      if (typeof options.zoom === 'number') {
+        zoom = options.zoom;
+      }
+      emit('moveend', { center, zoom });
+      emit('zoomend', { center, zoom });
+      return this;
+    },
+    queryRenderedFeatures() {
+      if (!state.data) return [];
+      const bounds = this.getBounds();
+      const normalized = normalizeBounds(bounds);
+      const features = state.data.features.filter((feature) => {
+        const [lng, lat] = feature.geometry.coordinates;
+        const inBounds = lng >= normalized.west && lng <= normalized.east && lat >= normalized.south && lat <= normalized.north;
+        const matchesCategory = state.selectedCategory === 'all' || feature.properties?.complaint_type === state.selectedCategory;
+        return inBounds && matchesCategory;
+      });
+      return features.filter((feature) => !feature.properties?.point_count);
+    }
+  };
+}
+
 function setFilterForLayers(filterExpression) {
   const layers = ['heatmap-layer', 'cluster-layer', 'unclustered-point-layer'];
   layers.forEach((layerId) => {
@@ -157,16 +260,120 @@ function getVisibleFeaturesInBounds(bounds) {
 function updateLayerOpacity(zoom) {
   const heatmapOpacity = zoom <= 9 ? 0.95 : 0.05;
   const clusterOpacity = zoom <= 9 ? 0.05 : 0.95;
+  const heatmapVisibility = zoom <= 9 ? 'visible' : 'none';
+  const clusterVisibility = zoom >= 10 ? 'visible' : 'none';
   if (map.getLayer('heatmap-layer')) {
     map.setPaintProperty('heatmap-layer', 'heatmap-opacity', heatmapOpacity);
+    map.setLayoutProperty('heatmap-layer', 'visibility', heatmapVisibility);
   }
   if (map.getLayer('cluster-layer')) {
     map.setPaintProperty('cluster-layer', 'circle-opacity', clusterOpacity);
+    map.setLayoutProperty('cluster-layer', 'visibility', clusterVisibility);
   }
 }
 
+async function initializeDashboard() {
+  const response = await fetch('/data/nyc_311.geojson');
+  const data = await response.json();
+  state.data = data;
+  state.categories = [...new Set(data.features.map((feature) => feature.properties?.complaint_type).filter(Boolean))].sort();
+  createCategoryOptions();
+
+  buildQuadtree();
+
+  map.addSource('complaints', {
+    type: 'geojson',
+    data,
+    cluster: true,
+    clusterMaxZoom: 14,
+    clusterRadius: 50
+  });
+
+  map.addLayer({
+    id: 'heatmap-layer',
+    type: 'heatmap',
+    source: 'complaints',
+    maxzoom: 9,
+    paint: {
+      'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 0, 1, 9, 20],
+      'heatmap-weight': 1,
+      'heatmap-intensity': 1,
+      'heatmap-color': [
+        'interpolate',
+        ['linear'],
+        ['heatmap-density'],
+        0, 'rgba(0,0,0,0)',
+        0.2, '#3b82f6',
+        0.4, '#10b981',
+        0.6, '#f59e0b',
+        1, '#ef4444'
+      ],
+      'heatmap-opacity': 0.95
+    }
+  });
+
+  map.addLayer({
+    id: 'cluster-layer',
+    type: 'circle',
+    source: 'complaints',
+    filter: ['has', 'point_count'],
+    paint: {
+      'circle-color': '#2563eb',
+      'circle-radius': ['step', ['get', 'point_count'], 18, 50, 24, 100, 30],
+      'circle-opacity': 0.05,
+      'circle-stroke-width': 1,
+      'circle-stroke-color': '#f8fafc'
+    }
+  });
+
+  map.addLayer({
+    id: 'unclustered-point-layer',
+    type: 'circle',
+    source: 'complaints',
+    filter: ['!', ['has', 'point_count']],
+    paint: {
+      'circle-color': '#f43f5e',
+      'circle-radius': 3,
+      'circle-opacity': 0.8
+    }
+  });
+
+  map.on('click', 'cluster-layer', (event) => {
+    const feature = event.features?.[0];
+    if (!feature) return;
+    const clusterId = feature.properties.cluster_id;
+    const source = map.getSource('complaints');
+    if (source?.getClusterExpansionZoom) {
+      source.getClusterExpansionZoom(clusterId, (error, zoomLevel) => {
+        if (error) return;
+        map.easeTo({ center: feature.geometry.coordinates, zoom: zoomLevel });
+      });
+    } else {
+      map.easeTo({ center: feature.geometry.coordinates, zoom: Math.min(14, map.getZoom() + 1) });
+    }
+  });
+
+  map.on('zoomend', () => {
+    updateLayerOpacity(map.getZoom());
+    updateStats();
+  });
+
+  map.on('moveend', () => {
+    updateStats();
+  });
+
+  applyFilter('all');
+  updateStats();
+}
+
 function initializeMap() {
-  map = new mapboxgl.Map({
+  map = useFallbackMap ? createFallbackMap({
+    container: 'map',
+    style: 'mapbox://styles/mapbox/light-v11',
+    center: [-74.0060, 40.7128],
+    zoom: 10,
+    attributionControl: false
+  }) : new mapboxgl.Map({
     container: 'map',
     style: 'mapbox://styles/mapbox/light-v11',
     center: [-74.0060, 40.7128],
@@ -174,94 +381,13 @@ function initializeMap() {
     attributionControl: false
   });
 
-  map.on('load', async () => {
-    const response = await fetch('/data/nyc_311.geojson');
-    const data = await response.json();
-    state.data = data;
-    state.categories = [...new Set(data.features.map((feature) => feature.properties?.complaint_type).filter(Boolean))].sort();
-    createCategoryOptions();
+  if (useFallbackMap) {
+    initializeDashboard();
+    return;
+  }
 
-    buildQuadtree();
-
-    map.addSource('complaints', {
-      type: 'geojson',
-      data,
-      cluster: true,
-      clusterMaxZoom: 14,
-      clusterRadius: 50
-    });
-
-    map.addLayer({
-      id: 'heatmap-layer',
-      type: 'heatmap',
-      source: 'complaints',
-      maxzoom: 9,
-      paint: {
-        'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 0, 1, 9, 20],
-        'heatmap-weight': 1,
-        'heatmap-intensity': 1,
-        'heatmap-color': [
-          'interpolate',
-          ['linear'],
-          ['heatmap-density'],
-          0, 'rgba(0,0,0,0)',
-          0.2, '#3b82f6',
-          0.4, '#10b981',
-          0.6, '#f59e0b',
-          1, '#ef4444'
-        ],
-        'heatmap-opacity': 0.95
-      }
-    });
-
-    map.addLayer({
-      id: 'cluster-layer',
-      type: 'circle',
-      source: 'complaints',
-      filter: ['has', 'point_count'],
-      paint: {
-        'circle-color': '#2563eb',
-        'circle-radius': ['step', ['get', 'point_count'], 18, 50, 24, 100, 30],
-        'circle-opacity': 0.05,
-        'circle-stroke-width': 1,
-        'circle-stroke-color': '#f8fafc'
-      }
-    });
-
-    map.addLayer({
-      id: 'unclustered-point-layer',
-      type: 'circle',
-      source: 'complaints',
-      filter: ['!', ['has', 'point_count']],
-      paint: {
-        'circle-color': '#f43f5e',
-        'circle-radius': 3,
-        'circle-opacity': 0.8
-      }
-    });
-
-    map.on('click', 'cluster-layer', (event) => {
-      const feature = event.features?.[0];
-      if (!feature) return;
-      const clusterId = feature.properties.cluster_id;
-      const source = map.getSource('complaints');
-      source.getClusterExpansionZoom(clusterId, (error, zoom) => {
-        if (error) return;
-        map.easeTo({ center: feature.geometry.coordinates, zoom: zoom });
-      });
-    });
-
-    map.on('zoomend', () => {
-      updateLayerOpacity(map.getZoom());
-      updateStats();
-    });
-
-    map.on('moveend', () => {
-      updateStats();
-    });
-
-    applyFilter('all');
-    updateStats();
+  map.on('load', () => {
+    initializeDashboard();
   });
 }
 
@@ -283,7 +409,7 @@ toggleButton.addEventListener('click', () => {
 });
 
 window.getMapState = () => ({
-  center: map.getCenter(),
+  center: [map.getCenter().lng, map.getCenter().lat],
   zoom: map.getZoom()
 });
 
